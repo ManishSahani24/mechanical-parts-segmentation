@@ -1,0 +1,23 @@
+# Data & model artifacts
+# (leading slash matters: a bare "data/" would also swallow src/data/)
+/data/
+/outputs/
+*.pth
+*.pt
+*.ckpt
+submission*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

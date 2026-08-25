@@ -1,0 +1,39 @@
+# Configuration reproducing the submitted Kaggle run
+# (2x Tesla T4, PyTorch 2.10, albumentations 2.0.8)
+
+seed: 42
+output_dir: outputs
+
+data:
+  # Point this at the folder that contains train/ and test/
+  root: data/Dataset
+  img_size: 384
+  num_classes: 7          # background + 6 component classes
+  val_frac: 0.15
+  num_workers: 2
+
+model:
+  stem_channels: 64
+  encoder_channels: [128, 256, 512, 1024]
+  encoder_blocks: [2, 2, 3, 3]
+  aspp_channels: 512
+  aspp_rates: [1, 4, 8, 16]
+  decoder_channels: [256, 128, 64, 64]
+
+train:
+  batch_size: 16          # drop to 4 if you hit OOM on a single small GPU
+  epochs: 60
+  lr: 3.0e-4
+  lr_min: 1.0e-6
+  weight_decay: 1.0e-4
+  t_0: 15                 # CosineAnnealingWarmRestarts
+  t_mult: 2
+  grad_clip: 1.0
+  amp: true
+  focal_gamma: 2.0
+  dice_smooth: 1.0
+  aux_weights: [0.4, 0.2] # deep-supervision weights for the two aux heads
+
+predict:
+  batch_size: 4
+  tta: true               # 8-fold dihedral test-time augmentation
