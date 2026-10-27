@@ -1,8 +1,6 @@
 # Mechanical Parts Segmentation
 
-Pixel-level segmentation of six mechanical component classes — hex nut, washer, bolt, ball bearing, spring, O-ring — using a U-Net trained from scratch in PyTorch.
-
-Built for the **NPPE-1 Deep Learning & Gen AI** Kaggle competition. **Rank 108 / 708.** Best validation Dice **0.9695**.
+Pixel-level segmentation of six mechanical component classes (hex nut, washer, bolt, ball bearing, spring, O-ring). This is my solution for the **NPPE-1 Deep Learning & Gen AI** Kaggle competition, where I placed 108th out of 708 with a best validation Dice score of 0.9695.
 
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.10-EE4C2C?logo=pytorch&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
@@ -14,7 +12,6 @@ Built for the **NPPE-1 Deep Learning & Gen AI** Kaggle competition. **Rank 108 /
 
 | | |
 |---|---|
-| **Leaderboard rank** | 108 / 708 |
 | **Best validation Dice** | 0.9695 (mean over 6 foreground classes) |
 | **Model** | ScratchUNet — 100.6M parameters, no pretrained weights |
 | **Training** | 60 epochs, ~1700 images, 2× Tesla T4, mixed precision |
@@ -22,31 +19,29 @@ Built for the **NPPE-1 Deep Learning & Gen AI** Kaggle competition. **Rank 108 /
 
 ![Training curves](assets/training_curves.png)
 
-*Left: Dice+Focal loss. The training curve includes the two auxiliary heads, so it sits above validation by construction — the two are not directly comparable. The y-axis is clipped at 0.75; epoch 1 validation loss was 15.1. Right: validation Dice, clipped at 0.88 (epochs 1–4 are below the axis). Both dips line up exactly with the cosine warm restarts — see [Honest notes](#honest-notes).*
-
-Raw per-epoch numbers: [`assets/training_history.csv`](assets/training_history.csv).
+*Raw per-epoch logs are available in [`assets/training_history.csv`](assets/training_history.csv).*
 
 ---
 
-## The problem
+## The Problem
 
-2,000 training images and 500 test images at 384×384. Each pixel belongs to one of 7 classes: background plus the six component types. Scoring is Dice over the foreground classes; submissions are run-length encoded per (image, class) pair.
+The dataset contains 2,000 training images and 500 test images at 384×384 resolution. The task is to classify every pixel into one of 7 classes (background + 6 part types) and evaluate using the Dice score on the foreground classes. 
 
 ![Class distribution](assets/class_distribution.png)
 
-Three things about this data shaped the design:
+A few quirks in the data dictated my approach:
 
-1. **Background dominates.** At 76% of all pixels, a model optimised with plain cross-entropy drifts toward predicting background everywhere and still looks good on paper. The loss has to be region-based.
-2. **Two classes are thin structures.** Springs and O-rings are coils and rings a few pixels wide. Downsampling too aggressively erases them; they need both fine detail and wide context.
-3. **There is no canonical orientation.** Parts sit on a flat tray at arbitrary angles, which makes the full dihedral group (flips + 90° rotations) a free, label-preserving augmentation — and the same trick works again at inference time as TTA.
+1. **Massive background imbalance.** Background takes up about 76% of all pixels. If you use standard cross-entropy, the model gets lazy, predicts background everywhere, and still looks decent on paper. I had to use a region-based loss.
+2. **Super thin structures.** Springs and O-rings are only a few pixels wide. If the network downsamples too aggressively, these classes completely disappear. They require a balance of fine detail and wide context.
+3. **Rotational invariance.** The parts are scattered on a flat tray at random angles. This means standard dihedral augmentations (flips + 90° rotations) are a free, label-preserving way to multiply the dataset, which also translates perfectly to Test-Time Augmentation (TTA).
 
 ---
 
-## Approach
+## My Approach
 
 ### Architecture
 
-A U-Net written from scratch — no ImageNet backbone. The images are synthetic renders of machined parts on a plain tray, so pretrained low-level filters buy little, and building the encoder myself left every choice (depth, width, dilation rates, where to attach auxiliary supervision) free to tune.
+I built a U-Net entirely from scratch instead of relying on an ImageNet backbone. Since the images are synthetic renders on a plain tray, pretrained weights didn't buy me much. Writing the encoder from scratch gave me total control over depth, dilation rates, and where to attach deep supervision.
 
 ```mermaid
 flowchart LR
@@ -71,27 +66,25 @@ flowchart LR
     D3 -. "aux head · w=0.2" .-> AUX
 ```
 
-Three design choices worth naming:
+A few specific design decisions:
 
-**ASPP at the bottleneck.** At 1/16 resolution the feature map is 24×24. Parallel dilated convolutions (rates 1, 4, 8, 16) plus a global-average branch let a single position see anything from a washer's rim to the entire tray, without a fifth downsample that would have cost the thin classes their detail.
+*   **ASPP at the bottleneck:** At 1/16 resolution, the feature map shrinks to 24×24. Using parallel dilated convolutions (rates 1, 4, 8, 16) plus a global-average branch lets a single position "see" everything from a small washer rim to the entire tray. This avoided a fifth downsampling step that would have destroyed the thin spring classes.
+*   **Residual blocks everywhere:** I used two 3×3 convolutions with an identity skip (2–3 per stage). When you're training a 100M-parameter model from random initialization, you desperately need the clean gradient flow that residual connections provide.
+*   **Deep supervision:** I added auxiliary 1×1 heads on decoder stages 4 and 3, upsampled them to full resolution, and supervised them with weights of 0.4 and 0.2. This pushes a direct gradient to the deeper layers rather than routing everything through the entire decoder. They turn off during inference, so they don't slow down predictions.
 
-**Residual blocks throughout the encoder.** Two 3×3 convs with an identity skip, 2–3 per stage. Training a 100M-parameter network from random init needs the gradient path that residual connections provide.
+*Note on BatchNorm: I dropped the momentum to 0.01 (from the 0.1 default). With a batch size of 16, the running stats were too noisy, causing validation accuracy to lag noticeably behind training accuracy.*
 
-**Deep supervision.** Auxiliary 1×1 heads on decoder stages 4 and 3, upsampled to full resolution and supervised with the same loss at weights 0.4 and 0.2. They give the deep layers a direct gradient instead of one routed through the whole decoder. They are active only in `train()` mode, so inference cost is unchanged.
+### Loss Function
 
-`BatchNorm` uses `momentum=0.01` rather than the 0.1 default — at batch size 16 the running statistics are noisy enough that eval-mode accuracy otherwise lags train-mode by a visible margin.
-
-### Loss
-
-```
+```python
 L = Dice(foreground only) + Focal(γ=2)
 ```
 
-The two terms fix different failure modes. **Soft Dice** optimises region overlap directly — it is the competition metric, and it is blind to the 76% background prior. **Focal loss** is a per-pixel term that keeps pushing on the small set of genuinely hard pixels, mostly object boundaries and the gaps between spring coils, long after Dice has flattened.
+I summed Soft Dice and Focal loss because they solve different problems. Dice directly optimizes the competition metric (region overlap) and ignores the massive background bias. Focal loss works on a per-pixel level, aggressively punishing the model for getting the hard pixels wrong—specifically object boundaries and the empty gaps between spring coils. 
 
-Neither works alone here: Dice by itself gives unstable gradients in the first few epochs when predictions are near-uniform, and cross-entropy by itself converges to a background-heavy solution. The sum trains smoothly from random init, which matters a lot when there is no pretrained encoder to fall back on.
+Neither works well in isolation here. Dice gradients are horribly unstable early in training, and cross-entropy heavily favors the background. Combined, they train smoothly right from a random initialization.
 
-### Training recipe
+### Training Setup
 
 | Setting | Value |
 |---|---|
@@ -103,50 +96,48 @@ Neither works alone here: Dice by itself gives unstable gradients in the first f
 | Epochs | 60 |
 | Split | 85 / 15 random, seed 42 |
 
-Augmentation (albumentations): horizontal/vertical flips and 90° rotations; shift-scale-rotate; elastic and grid distortion; one of brightness-contrast / hue-saturation / CLAHE; Gaussian noise and blur; coarse dropout. The warps matter more than they look — without them the model learns spring and O-ring by shape template rather than by texture, and coarse dropout forces it to use surrounding context instead of matching whole objects.
+**Augmentations (Albumentations):** Flips, 90° rotations, shift-scale-rotate, elastic/grid distortion, brightness/contrast, hue/saturation, CLAHE, Gaussian noise/blur, and coarse dropout. The warping augmentations were actually crucial. Without them, the model just memorized the rigid shapes of the springs and O-rings instead of learning their actual textures. Coarse dropout forced the network to rely on surrounding context rather than easily matching whole objects.
 
-### Test-time augmentation
+### Test-Time Augmentation (TTA)
 
-The same dihedral symmetry that made augmentation free applies at inference. Each test image is predicted under all 8 views, each probability map is mapped back through the inverse transform, and the 8 are averaged.
+I reused the dihedral symmetry for inference. Every test image goes through the model 8 times (all flip and 90° rotation combos). The resulting probability maps are inversely transformed and averaged. 
 
-Averaging happens in **softmax probability space**, not on argmax labels — averaging hard labels would discard exactly the confidence information that makes the ensemble worth anything.
+I made sure to average the probabilities in **softmax space**, not the hard argmax labels. Averaging hard labels throws away the confidence data, which completely defeats the purpose of ensembling.
 
 ---
 
-## Repository layout
+## Repo Layout
 
-```
-├── configs/default.yaml            # every hyper-parameter of the submitted run
+```text
+├── configs/default.yaml            # Master config for the submitted run
 ├── notebooks/
-│   └── nppe1_semantic_segmentation.ipynb   # the original Kaggle notebook
+│   └── nppe1_semantic_segmentation.ipynb   # Original Kaggle notebook
 ├── src/
-│   ├── config.py                   # typed config loaded from YAML
-│   ├── constants.py                # class ids, names, colours, normalisation stats
-│   ├── rle.py                      # run-length encode/decode (column-major)
+│   ├── config.py                   # Typed YAML config loader
+│   ├── constants.py                # Class IDs, colors, norm stats
+│   ├── rle.py                      # Column-major run-length encoding
 │   ├── data/
-│   │   ├── dataset.py              # SegmentationDataset, split, dataloaders
-│   │   └── transforms.py           # albumentations pipelines
+│   │   ├── dataset.py              # SegmentationDataset and splits
+│   │   └── transforms.py           # Albumentations pipelines
 │   ├── models/
-│   │   ├── blocks.py               # ConvBnAct, ResBlock, EncoderBlock, ASPP, DecoderBlock
-│   │   └── unet.py                 # ScratchUNet
-│   ├── losses.py                   # Dice, Focal, Combined
-│   ├── metrics.py                  # foreground Dice
-│   ├── engine.py                   # train / validate loops
-│   ├── tta.py                      # 8-fold dihedral TTA
-│   ├── train.py                    # entry point
-│   ├── predict.py                  # entry point → submission.csv
-│   └── evaluate.py                 # entry point → per-class Dice, TTA delta
+│   │   ├── blocks.py               # ConvBnAct, ResBlock, ASPP, etc.
+│   │   └── unet.py                 # ScratchUNet definition
+│   ├── losses.py                   # Dice, Focal, and Combined loss
+│   ├── metrics.py                  # Foreground Dice calculator
+│   ├── engine.py                   # Train and validation loops
+│   ├── tta.py                      # 8-fold dihedral TTA logic
+│   ├── train.py                    # Training entry point
+│   ├── predict.py                  # Inference entry point -> submission.csv
+│   └── evaluate.py                 # Validation eval -> per-class Dice
 ├── scripts/
-│   ├── build_notebook.py           # regenerates the notebook
-│   └── make_figures.py             # regenerates the README charts from the run log
+│   ├── build_notebook.py           # Recompiles the Kaggle notebook
+│   └── make_figures.py             # Generates the charts in this README
 ├── tests/
-│   ├── test_rle.py                 # encode/decode round-trip, column-major order
-│   ├── test_tta.py                 # all 8 views distinct, every inverse round-trips
-│   └── test_model.py               # head shapes, train/eval contract, gradients
-└── assets/                         # charts + per-epoch training log
+│   ├── test_rle.py                 # Tests RLE encode/decode round-trips
+│   ├── test_tta.py                 # Verifies inverse transforms map correctly
+│   └── test_model.py               # Checks head shapes and gradient flow
+└── assets/                         # Charts and training logs
 ```
-
-
 
 ---
 
@@ -158,9 +149,9 @@ cd mechanical-parts-segmentation
 pip install -r requirements.txt
 ```
 
-Download the competition data and point `configs/default.yaml` at it. The expected layout is:
+Download the Kaggle competition data and point `configs/default.yaml` to it. The code expects this structure:
 
-```
+```text
 data/Dataset/
 ├── train/images/*.png
 ├── train/masks/*.png
@@ -168,27 +159,26 @@ data/Dataset/
 └── sample_submission.csv
 ```
 
+**Commands:**
+
 ```bash
-# Train (writes outputs/best_model.pth and outputs/history.csv)
+# Run training (saves to outputs/best_model.pth and outputs/history.csv)
 python -m src.train --config configs/default.yaml
 
-# Per-class Dice on the held-out split, with and without TTA
+# Evaluate per-class Dice on the validation split (with/without TTA)
 python -m src.evaluate --checkpoint outputs/best_model.pth --compare-tta
 
-# Generate a submission
+# Generate the final Kaggle submission
 python -m src.predict --checkpoint outputs/best_model.pth --out outputs/submission.csv
 
-# Tests
+# Run unit tests
 pytest tests/
 ```
 
-
 ---
-
-
 
 ## Acknowledgements
 
-Dataset from the [DL & Gen AI course semantic segmentation](https://www.kaggle.com/competitions/nppe-1-dl-gen-ai-course-semantic-segmentation) competition on Kaggle.
+Dataset provided by the [DL & Gen AI course semantic segmentation](https://www.kaggle.com/competitions/nppe-1-dl-gen-ai-course-semantic-segmentation) competition on Kaggle.
 
-Licensed under the MIT License — see [LICENSE](LICENSE).
+Licensed under the MIT License — see [LICENSE](LICENSE) for details.
