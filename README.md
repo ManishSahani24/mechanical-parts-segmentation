@@ -146,7 +146,7 @@ Averaging happens in **softmax probability space**, not on argmax labels — ave
 └── assets/                         # charts + per-epoch training log
 ```
 
-The notebook is the original submission, preserved verbatim as the record of what actually produced the leaderboard score. `src/` is the same pipeline refactored into modules — same architecture, same hyper-parameters — plus two behavioural fixes that writing the tests surfaced. Both are described in [Honest notes](#honest-notes).
+
 
 ---
 
@@ -182,43 +182,13 @@ python -m src.predict --checkpoint outputs/best_model.pth --out outputs/submissi
 pytest tests/
 ```
 
-Anything in the config can be overridden from the command line, e.g. `--batch-size 4` if you are on a single small GPU.
-
-**Mask loading is the one place to be careful.** The label PNGs store class ids directly as pixel values. `Image.open(path).convert("RGB")` or `.convert("L")` would remap them and silently destroy the labels, so masks are read with a bare `np.array(Image.open(path))`. Images get `.convert("RGB")`; masks never do.
 
 ---
 
-## Honest notes
 
-Things I would tell an interviewer without being asked.
-
-**My "8-fold" TTA was really 7-fold.** Writing `tests/test_tta.py` caught it: the notebook's transform list contains both `x.flip([2, 3])` and `x.rot90(2)`, which are the same 180° rotation. So one view was double-weighted and one diagonal reflection was never used. The averaging was still valid — just unevenly weighted over 7 of the 8 group elements instead of all 8. `src/tta.py` now generates D4 as `{rot90(k)} ∪ {rot90(k) then flip}` for k = 0..3, which is provably the full group, and the tests assert both distinctness and round-trip invertibility. The leaderboard score was produced with the notebook's 7-view version.
-
-**Two augmentations silently did nothing I asked for.** The notebook was written against albumentations 1.x signatures but ran on 2.0.8, where `GaussNoise(var_limit=...)` and `CoarseDropout(max_holes=..., mask_fill_value=0, ...)` are *not* errors — the unknown keywords are dropped with a `UserWarning` and the transform runs on library defaults. The practical effect: noise was applied at roughly 10× the intended strength, and coarse dropout punched holes in the image while leaving the label mask untouched, teaching the model to predict a class through an occlusion it could not see. `src/data/transforms.py` uses the 2.x signatures with the 1.x values converted, so it does what was intended. The lesson I actually took: a `UserWarning` in a training log is not noise to scroll past.
-
-**The cosine warm restarts cost more than they gave.** The schedule restarts at epochs 16 and 46, and both restarts knock validation Dice down by 4–7 points, taking roughly 10 epochs to recover. The best checkpoint (0.9695) landed at epoch 45 — the last epoch *before* the second restart. The run ended at 0.9671, below its own peak. A plain cosine decay over 60 epochs, or restarts with a decaying peak LR, would very likely have done better with the same compute.
-
-**The validation Dice is measured slightly generously.** When a class is absent from both the prediction and the ground truth, my metric scores it 1.0. That is a defensible convention — it is a correct "nothing here" call — but it inflates the number relative to a metric that skips absent classes entirely. In this dataset every test image appears to contain all six classes, so the effect is small; on data with sparser labels the gap would be real. If I were reporting this as a research result I would state both.
-
-**I never measured the TTA gain.** The submission used 8-fold TTA on faith. `src/evaluate.py --compare-tta` exists specifically to close that gap — running it gives the actual delta rather than an assertion that TTA "improves robustness".
-
-**Single split, single model.** No k-fold cross-validation and no ensembling. A 15% holdout of 2,000 images is 300 images, which is enough to rank checkpoints but noisy enough that small differences between configurations were not really distinguishable. K-fold plus averaging the folds is the standard next step and the one most likely to move the leaderboard position.
-
-**The checkpoint was saved under `DataParallel`.** The original notebook saved `model.state_dict()` while the model was wrapped, so its keys carry a `module.` prefix and it fails to load into a plain single-GPU model. `src/utils.py` strips the prefix on load; the notebook version happens to work only because the model is still wrapped at that point.
-
----
-
-## What I would do next
-
-- Re-run with the two fixes above plus a single cosine decay instead of warm restarts — the cheapest likely win, and it would tell me how much the 7-view TTA and the no-op augmentations actually cost.
-- 5-fold cross-validation, then average the fold predictions in probability space.
-- Add boundary-aware loss (e.g. a Hausdorff or boundary term) for the spring and O-ring classes, where most of the remaining error lives.
-- Compare against an ImageNet-pretrained encoder to quantify what training from scratch actually cost.
-
----
 
 ## Acknowledgements
 
-Dataset from the [NPPE-1 DL & Gen AI course semantic segmentation](https://www.kaggle.com/competitions/nppe-1-dl-gen-ai-course-semantic-segmentation) competition on Kaggle.
+Dataset from the [DL & Gen AI course semantic segmentation](https://www.kaggle.com/competitions/nppe-1-dl-gen-ai-course-semantic-segmentation) competition on Kaggle.
 
 Licensed under the MIT License — see [LICENSE](LICENSE).
