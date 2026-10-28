@@ -1,6 +1,6 @@
 # Mechanical Parts Segmentation
 
-Pixel-level segmentation of six mechanical component classes (hex nut, washer, bolt, ball bearing, spring, O-ring). This is my solution for the **NPPE-1 Deep Learning & Gen AI** Kaggle competition, where I placed 108th out of 708 with a best validation Dice score of 0.9695.
+Pixel-level segmentation of six mechanical component classes (hex nut, washer, bolt, ball bearing, spring, O-ring)
 
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.10-EE4C2C?logo=pytorch&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
